@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 import time
 from streamlit_autorefresh import st_autorefresh
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 st.set_page_config(layout="wide", page_title="Crypto Scan Pro")
 # ==========================================
@@ -115,9 +114,8 @@ if "level_alerts" not in st.session_state:
 # ==========================================
 
 def fetch_coin_data(sym, ref):
-    """Récupère les données pour une pièce avec timeout et retry"""
+    """Récupère les données pour une pièce (sans accès à Streamlit context)"""
     try:
-        # Utiliser une session pour améliorer les perfs
         session = requests.Session()
         
         # 1. Prix actuel
@@ -126,7 +124,7 @@ def fetch_coin_data(sym, ref):
         price = float(r.json()["price"])
         var = ((price - ref) / ref) * 100
 
-        # 2. Récupération des niveaux (1H et 15min) en parallèle - réduire le nombre de klines
+        # 2. Récupération des niveaux (1H et 15min)
         h1_data = session.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1h&limit=24", timeout=3).json()
         sup_1h = min([float(c[3]) for c in h1_data])
         res_1h = max([float(c[2]) for c in h1_data])
@@ -136,30 +134,12 @@ def fetch_coin_data(sym, ref):
         sup_15m = min([float(c[3]) for c in m15_data])
         res_15m = max([float(c[2]) for c in m15_data])
 
-        # --- LOGIQUE ALERTE SUPPORTS / RÉSISTANCES (Seuil 0.2%) ---
-        levels = [
-            (sup_1h, "SUPPORT 1H", "📉"), 
-            (sup_15m, "SUPPORT 15M", "📉"),
-        ]
-
-        for val, label, emoji in levels:
-            diff_pct = abs((price - val) / val) * 100
-            alert_key = f"{sym}_{label}"
-            
-            if diff_pct <= 0.2:
-                if st.session_state.level_alerts.get(alert_key) != "near":
-                    msg = f"{emoji} *PROXIMITÉ {label} : {sym}*\n\n💰 Prix: {price}\n🎯 Niveau: {val}\n⚡ Écart: {diff_pct:.3f}%"
-                    send_telegram(msg)
-                    st.session_state.level_alerts[alert_key] = "near"
-            else:
-                st.session_state.level_alerts[alert_key] = "clear"
-
         color = "#00FF00" if var > 0.10 else "#FF0000" if var < -0.10 else "#444444"
         return {
             "Coin": sym.replace("USDT",""), "Price": price, "Var": var, 
             "S1H": sup_1h, "R1H": res_1h, "S15M": sup_15m, "R15M": res_15m, "Color": color
         }
-    except Exception as e:
+    except Exception:
         return None
 
 def send_telegram(msg):
@@ -186,6 +166,29 @@ def get_crypto_data():
     
     return pd.DataFrame(rows)
 
+def check_and_send_alerts(df):
+    """Vérifie et envoie les alertes de supports/résistances (exécuté dans le thread principal)"""
+    for _, row in df.iterrows():
+        sym = row["Coin"] + "USDT"
+        price = row["Price"]
+        
+        levels = [
+            (row["S1H"], "SUPPORT 1H", "📉"), 
+            (row["S15M"], "SUPPORT 15M", "📉"),
+        ]
+
+        for val, label, emoji in levels:
+            diff_pct = abs((price - val) / val) * 100
+            alert_key = f"{sym}_{label}"
+            
+            if diff_pct <= 0.2:
+                if st.session_state.level_alerts.get(alert_key) != "near":
+                    msg = f"{emoji} *PROXIMITÉ {label} : {sym}*\n\n💰 Prix: {price}\n🎯 Niveau: {val}\n⚡ Écart: {diff_pct:.3f}%"
+                    send_telegram(msg)
+                    st.session_state.level_alerts[alert_key] = "near"
+            else:
+                st.session_state.level_alerts[alert_key] = "clear"
+
 # ==========================================
 # INTERFACE STREAMLIT
 # ==========================================
@@ -195,6 +198,10 @@ st_autorefresh(interval=60000, key="crypto_refresh")
 st.title("📈 Heatmap & Scanner de Niveaux (1H / 15Min)")
 
 df = get_crypto_data()
+
+# Vérifier les alertes dans le thread principal (sans ScriptRunContext warning)
+if not df.empty:
+    check_and_send_alerts(df)
 
 if not df.empty:
     # On affiche les niveaux 15min et 1H sur la carte
