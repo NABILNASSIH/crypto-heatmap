@@ -4,6 +4,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import time
 from streamlit_autorefresh import st_autorefresh
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
 st.set_page_config(layout="wide", page_title="Crypto Scan Pro")
 # ==========================================
 # CONFIGURATION
@@ -110,68 +113,77 @@ if "level_alerts" not in st.session_state:
 # ==========================================
 # FONCTIONS TECHNIQUES
 # ==========================================
+
+def fetch_coin_data(sym, ref):
+    """Récupère les données pour une pièce avec timeout et retry"""
+    try:
+        # Utiliser une session pour améliorer les perfs
+        session = requests.Session()
+        
+        # 1. Prix actuel
+        r = session.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=3)
+        r.raise_for_status()
+        price = float(r.json()["price"])
+        var = ((price - ref) / ref) * 100
+
+        # 2. Récupération des niveaux (1H et 15min) en parallèle - réduire le nombre de klines
+        h1_data = session.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1h&limit=24", timeout=3).json()
+        sup_1h = min([float(c[3]) for c in h1_data])
+        res_1h = max([float(c[2]) for c in h1_data])
+
+        # 15m
+        m15_data = session.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=15m&limit=16", timeout=3).json()
+        sup_15m = min([float(c[3]) for c in m15_data])
+        res_15m = max([float(c[2]) for c in m15_data])
+
+        # --- LOGIQUE ALERTE SUPPORTS / RÉSISTANCES (Seuil 0.2%) ---
+        levels = [
+            (sup_1h, "SUPPORT 1H", "📉"), 
+            (sup_15m, "SUPPORT 15M", "📉"),
+        ]
+
+        for val, label, emoji in levels:
+            diff_pct = abs((price - val) / val) * 100
+            alert_key = f"{sym}_{label}"
+            
+            if diff_pct <= 0.2:
+                if st.session_state.level_alerts.get(alert_key) != "near":
+                    msg = f"{emoji} *PROXIMITÉ {label} : {sym}*\n\n💰 Prix: {price}\n🎯 Niveau: {val}\n⚡ Écart: {diff_pct:.3f}%"
+                    send_telegram(msg)
+                    st.session_state.level_alerts[alert_key] = "near"
+            else:
+                st.session_state.level_alerts[alert_key] = "clear"
+
+        color = "#00FF00" if var > 0.10 else "#FF0000" if var < -0.10 else "#444444"
+        return {
+            "Coin": sym.replace("USDT",""), "Price": price, "Var": var, 
+            "S1H": sup_1h, "R1H": res_1h, "S15M": sup_15m, "R15M": res_15m, "Color": color
+        }
+    except Exception as e:
+        return None
+
 def send_telegram(msg):
+    """Envoie un message Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=5)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=3)
     except:
         pass
 
+@st.cache_data(ttl=30)  # Cache de 30 secondes
 def get_crypto_data():
+    """Récupère les données de tous les coins en parallèle"""
     rows = []
-    for sym, ref in COINS_REF.items():
-        try:
-            # 1. Prix actuel
-            r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={sym}", timeout=2).json()
-            price = float(r["price"])
-            var = ((price - ref) / ref) * 100
-
-            # 2. Récupération des niveaux (1H et 15min)
-            # 1H (High/Low des dernières 24h)
-            h1_data = requests.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=1h&limit=48").json()
-            sup_1h = min([float(c[3]) for c in h1_data])
-            res_1h = max([float(c[2]) for c in h1_data])
-
-            # 15m (High/Low des dernières 4h)
-            m15_data = requests.get(f"https://api.binance.com/api/v3/klines?symbol={sym}&interval=15m&limit=32").json()
-            sup_15m = min([float(c[3]) for c in m15_data])
-            res_15m = max([float(c[2]) for c in m15_data])
-
-            # --- LOGIQUE ALERTE VARIATION (1%) ---
-            # last_var = st.session_state.sent_alerts.get(sym, 0)
-            # if abs(var) >= 1.0 and last_var != (1 if var > 0 else -1):
-                # send_telegram(f"🔔 *ALERTE VARIATION : {sym}*\nVar: {var:+.2f}%\nPrix: {price}")
-               #  st.session_state.sent_alerts[sym] = (1 if var > 0 else -1)
-           #  elif -0.2 < var < 0.2:
-               #  st.session_state.sent_alerts[sym] = 0
-
-            # --- LOGIQUE ALERTE SUPPORTS / RÉSISTANCES (Seuil 0.2%) ---
-            levels = [
-                (sup_1h, "SUPPORT 1H", "📉"), 
-                # (res_1h, "RÉSISTANCE 1H", "📈"),
-                (sup_15m, "SUPPORT 15M", "📉"),
-               #  (res_15m, "RÉSISTANCE 15M", "📈")
-            ]
-
-            for val, label, emoji in levels:
-                diff_pct = abs((price - val) / val) * 100
-                alert_key = f"{sym}_{label}"
-                
-                # Alerte si on est à moins de 0.2% du niveau
-                if diff_pct <= 0.2:
-                    if st.session_state.level_alerts.get(alert_key) != "near":
-                        msg = f"{emoji} *PROXIMITÉ {label} : {sym}*\n\n💰 Prix: {price}\n🎯 Niveau: {val}\n⚡ Écart: {diff_pct:.3f}%"
-                        send_telegram(msg)
-                        st.session_state.level_alerts[alert_key] = "near"
-                else:
-                    st.session_state.level_alerts[alert_key] = "clear"
-
-            color = "#00FF00" if var > 0.10 else "#FF0000" if var < -0.10 else "#444444"
-            rows.append({
-                "Coin": sym.replace("USDT",""), "Price": price, "Var": var, 
-                "S1H": sup_1h, "R1H": res_1h, "S15M": sup_15m, "R15M": res_15m, "Color": color
-            })
-        except: continue
+    
+    # Utiliser ThreadPoolExecutor pour paralléliser les requêtes
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(fetch_coin_data, sym, ref): sym for sym, ref in COINS_REF.items()}
+        
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                rows.append(result)
+    
     return pd.DataFrame(rows)
 
 # ==========================================
