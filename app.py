@@ -3,7 +3,8 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import time
-
+from streamlit_autorefresh import st_autorefresh
+st.set_page_config(layout="wide", page_title="Crypto Scan Pro")
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -137,7 +138,7 @@ def get_crypto_data():
             res_15m = max([float(c[2]) for c in m15_data])
 
             # --- LOGIQUE ALERTE VARIATION (1%) ---
-            last_var = st.session_state.sent_alerts.get(sym, 0)
+            # last_var = st.session_state.sent_alerts.get(sym, 0)
             # if abs(var) >= 1.0 and last_var != (1 if var > 0 else -1):
                 # send_telegram(f"🔔 *ALERTE VARIATION : {sym}*\nVar: {var:+.2f}%\nPrix: {price}")
                #  st.session_state.sent_alerts[sym] = (1 if var > 0 else -1)
@@ -176,7 +177,9 @@ def get_crypto_data():
 # ==========================================
 # INTERFACE STREAMLIT
 # ==========================================
-st.set_page_config(layout="wide", page_title="Crypto Scan Pro")
+
+st_autorefresh(interval=60000, key="crypto_refresh")
+
 st.title("📈 Heatmap & Scanner de Niveaux (1H / 15Min)")
 
 df = get_crypto_data()
@@ -195,8 +198,6 @@ if not df.empty:
         marker=dict(colors=df["Color"], line=dict(width=2, color="#0e1117"))
     ))
     fig.update_layout(height=850, margin=dict(t=0, l=10, r=10, b=0), paper_bgcolor="#0e1117", font=dict(color="white"))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 st.write(f"Dernière analyse : {time.strftime('%H:%M:%S')} | Seuil Proximité : 0.2%")
-time.sleep(15)
-st.rerun()
